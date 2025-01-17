@@ -1,0 +1,1151 @@
+---
+title: "Skin PPG Analysis Report"
+author: "Joel Parker"
+date: "`r Sys.Date()`"
+format: 
+  html: 
+    code-fold: true
+    toc: true
+    self-contained: true
+    output-file: "SkinPPGAnalysis2025-01-13.html"
+---
+
+# Executive Summary
+
+In this report, we analyze the log cpm expression for 24 selected genes in 870 samples from 54 people. First we show the mean (and 95% confidence of mean) for the log2 cpm expression for each gene across the sun protected (SP), sun damaged (SD), AK edge (AKEdge) and AK center (AKCenter) and cSCC regions in the epidermis and dermis tissues separately. We the then look at the pairwise comparisons of each of those reasons using a random intercept model. We plot the pairwise comparison for genes that were differentially expressed in at least one region. Next we look at the log2 cpm trend from SP to AK center using generalized estimating equations. We found HLA-TPB1 had an up regulated trend from SP to AK center and plot the population average trend.. Next we Differential expression for epi SD, AK edge and AK center vs cSCC as well as derm SD, AK edge and AK center vss cSCC stroma. We found several genes that were up or down regulated in cSCC samples compared to the three other regions. Finally, we highlight the results in an interactive heatmap.
+
+```{r setupAnalysis, warning=FALSE, message=FALSE}
+
+# Get packages 
+packages <- c("NanoStringNCTools",
+              "GeomxTools",
+              "GeoMxWorkflows",
+              "knitr",
+              "kableExtra",
+              "magrittr",
+              "ggplot2",
+              "plotly",
+              "patchwork",
+              "data.table",
+              "geepack", 
+              "nlme",
+              "emmeans")
+
+
+for (pkg in packages) {
+  # If package is not installed then install it. 
+  if(!(pkg %in% installed.packages()[,1])){install.packages(pkg)}
+  
+  # Load package. 
+  library(pkg,character.only = TRUE)
+}
+
+
+for (i in dir("R")) {
+  source(paste0("R/",i))
+}
+```
+
+## Data loading
+
+Here we are loading the preprocessed data. This data is stored at Processed/StandardizedNanostringData.rds and contains the raw reads and the log2 counts per million gene expression data. Additionally, it contains the phenotypic information (AOI, ROI, SubjectID) and quality control metrics for each sample. We create an analysis data csv file which will contain the phenotype information, AOI, ROI, SubjectID and the log2 CPM for each gene.
+
+Note: For subjectIDs 200016 and 200018, the Ak edge and AK center sample were ran on plate 5 and then reran on plate 14. We will be using the samples from plate 14 and therefore removing AK edge and AK center samples for these subjectIDs on plate 5.
+
+Note: We have two subjects with matched SP/SD/AK samples with cSCC. The cSCC samples have different subjectIDs, therefore, we are changing the cSCC subjectIDs for these two participants to match the subjectIDs used for the SP/SD/AK samples.
+
+| SP through AK Subject ID | cSCC Subject ID |
+|--------------------------|-----------------|
+| 300103                   | 101123          |
+| 300108                   | 101152          |
+
+```{r AnalysisDataGeneration, warning=FALSE, message=FALSE}
+####################################################################
+## This chunk is intendend to create the geneAnalysisData.csv from the StandardizedNanostringData.rds
+## Nanostring object that contains the phenotype information, gene annotations, 
+## and the Raw reads and the CPM standardized reads for each sample. 
+##
+## This chunk is not nessisary to run if the GeneAnalysisData.csv has
+## already been created.
+###################################################################
+
+######################################
+##  Load Normalized Data
+######################################
+# This is a link to the processed data on cyverse
+data_path = data_path = "https://data.cyverse.org/dav-anon/iplant/projects/SkinPPG/H202SC24094550/Nanostring/Processed/StandardizedNanostringData.rds" 
+
+# You may need to edit this code to update path
+normalizedData <- readRDS(url(data_path))
+
+
+##########################################
+## Pull use the log2(CPM) expression data
+##########################################
+
+# Get the assay data for the modeling CPM 
+assay <- data.table(t(assayDataElement(normalizedData, elt = "CPM")), keep.rownames = TRUE) 
+
+# Check 2^x for each row should give us 1 million
+#table(round(rowSums(2^assay[,-'rn']),6))
+
+#dim(assay)
+
+##########################################
+##  Pull meta data nanostring data and add the 
+##. Ordinal region variable
+##.   SP =0
+##.   SD = 1
+##.   AK edge = 2
+##.   AK center = 3
+##########################################
+metaData <- data.table(normalizedData@phenoData@data[,c("SubjectID","AOIInfo","Region","Roi","Plate")], keep.rownames = TRUE)
+
+# Add ordinal variable
+metaData[,RegionOrdinal := fcase(
+  Region == "SunProtected", 0,
+  Region == "SunDamaged",1,
+  Region == "AKEdge", 2,
+  Region == "AKCenter",3
+)]
+
+
+
+# Compare plate 5 and 14 Subjects 200016 and 200018 had samples re
+#plate5 <- metaData[Plate=="Skin5"]
+#plate14 <- metaData[Plate=="Skin14"]
+
+#table(plate5$SubjectID)
+#table(plate14$SubjectID)
+
+# SubjectID 200016 had AK edge and AK center reran
+#subject16 <- metaData[SubjectID==200016]
+#table(subject16$Plate,subject16$Region,subject16$AOIInfo)
+
+
+#subject18 <- metaData[SubjectID==200018]
+#table(subject18$Plate,subject18$Region,subject18$AOIInfo)
+
+#table(metaData$Region, metaData$RegionOrdinal)
+#class(metaData$RegionOrdinal)
+
+
+#######################################################
+## For subjectIDs 200016 and 200018, regions AKEdge 
+## and AK Center were ran on plate 5 and then again
+##. on plate 14. This means the samples were
+## ran twice. We will remove the duplicated samples
+## From plate 5 from the down stream analysis
+########################################################
+# Get the sample names for the duplicated samples
+duplicatedSamps <- metaData[(SubjectID %in% c(200016,200018)) &
+                              grepl("AK",Region) &
+                              Plate=="Skin5"]
+
+
+# Subset the phenotype data to exclude the duplicated samples
+metaData <- metaData[!(rn %in% duplicatedSamps$rn)]
+
+
+
+##############################################################
+##
+##. There are 3 subjects with matched SP and cSCC samples
+##. However, the subject IDs are different. We will convert
+##. The cSCC subjectIDs to match the SP IDs. See note above.
+##
+## | SP through AK Subject ID | cSCC Subject ID |
+# |--------------------------|-----------------|
+# | 300103                   | 101123          |
+# | 300108                   | 101152          |
+##############################################################
+
+# Make sure all of the ids are in the meta data
+ids <- c("300103","300108","101123","101152")
+
+metaData[, SubjectIDMatched := ifelse(SubjectID=="101123","300103",
+                                      ifelse(SubjectID=="101152","300108",
+                                             SubjectID))]
+
+# metaData[grepl("300103",SubjectIDMatched),.(SubjectID,SubjectIDMatched,AOIInfo)]
+# metaData[grepl("300108",SubjectIDMatched),.(SubjectID,SubjectIDMatched,AOIInfo)]
+
+
+############################################
+## Merge the assay data and metaData into 
+## one analysis dataset
+############################################
+AnalysisData <- merge(metaData,assay,by='rn')
+
+# Change the rn column to sample_ID
+setnames(AnalysisData, old = 'rn', new = "SampleID")
+
+
+##############################################
+## Create sample distribution table
+## We are splitting the tables up to make the tables
+## easier to read in the html file. 
+###############################################
+
+# Gets the number of samples for each participant grouped by Region and AOI
+dist <- AnalysisData[,.(N= .N), by=.(SubjectIDMatched,Region,AOIInfo)
+                     ][,RegionAOI :=paste0(Region," (",AOIInfo,")")]
+
+
+# filter for Non cSCC samples
+options(knitr.kable.NA = '')
+tableNoncSCC <- dcast.data.table(SubjectIDMatched~RegionAOI, value.var = "N", data=dist[AOIInfo!="cSCC"])
+
+# Add row totals
+tableNoncSCC[,Total:=rowSums(.SD,na.rm = T), .SDcols = is.numeric]
+
+# Generate table
+rbind(tableNoncSCC,
+    as.list(c("Total",colSums(tableNoncSCC[,-1], na.rm = T))),use.names=F)%>%
+  kbl(caption = "Sample distribution for non cSCC samples") %>%
+  kable_classic() %>%
+  scroll_box(width = "100%", height = "400px")
+
+# Show cSCC samples
+tablecSCC<- dcast.data.table(SubjectIDMatched~RegionAOI, value.var = "N", data=dist[AOIInfo=="cSCC"])
+
+# Add row totals
+tablecSCC[,Total:=rowSums(.SD,na.rm = T), .SDcols = is.numeric]
+
+
+rbind(tablecSCC,
+    as.list(c("Total",colSums(tablecSCC[,-1], na.rm = T))),use.names=F)%>%
+  kbl(caption = "Sample distribution for non cSCC samples") %>%
+  kable_classic() %>%
+  scroll_box(width = "100%", height = "400px")
+
+#names(AnalysisData)[1:10]
+
+##############################################################################
+# Save analysis data
+###############################################################################
+saveRDS(AnalysisData , "GeneAnalysisData.RDS")
+
+```
+
+## Means Accross ROI
+For selected genes, we will be plotting the mean and 95% confidence intervals across ROI's for each ROI. We are creating 
+
+CD274, CD28, CD80, CD86, CIITA, CTLA4, HAVCR2, HLA-DMA HLA-DOA, HLA-DOB, HLA-DPB1, HLA-DRB1, LAG3, LGALS1, LGALS3, LGALS4, PDCD1, PDCD1LG2, PVR, TIGIT, TNFRSF18, TNFRSF9, TNFSF18, TNFSF9.
+
+There are interesting patterns of expression for genes CD274, CD28, CD80, and CD86 for epidermis skin. 
+Additionally, genes CIITA, HLA-DMA, HLA-DPB1, and HLA-DRB1 in the dermis skin. 
+
+```{r means and confidence,warning=FALSE, message=FALSE ,fig.width=7.5, fig.height=7.5}
+# Read in analysis data
+analysis <- readRDS("GeneAnalysisData.RDS")
+setDT(analysis) # turn data into a data table object
+
+
+##################################################################
+# Create gene list
+##################################################################
+genes<-c("CD274","CD28","CD80","CD86","CIITA","CTLA4","HAVCR2","HLA-DMA","HLA-DOA",
+          "HLA-DOB","HLA-DPB1","HLA-DRB1","LAG3","LGALS1","LGALS3","LGALS4","PDCD1",
+          "PDCD1LG2", "PVR", "TIGIT", "TNFRSF18", "TNFRSF9", "TNFSF18",  "TNFSF9"  )
+
+
+#############################################################
+## Make analysis data long so the genes are in the rows
+#############################################################
+cols <- c("SubjectID","AOIInfo","Region","SubjectIDMatched",genes)
+
+analysisLong <- melt.data.table(analysis[,.SD,.SDcols = cols],
+                                id.vars = c("SubjectID","AOIInfo","Region","SubjectIDMatched"),
+                                variable.name = "genes",
+                                value.name = "exp")
+
+
+
+
+
+###############################################################################
+## Split data into Epi and Derm
+###
+###. With cSCC Stroma in the Derm strata and cSCC Tumor, edge and center in the Epi strata. 
+################################################################################
+
+epiDat <- analysisLong[AOIInfo == "Epi" | (Region %in% c("cSCC_Edge","cSCC_Center","cSCC_Tumor"))][,Region := ifelse(
+  Region %in% c("cSCC_Edge","cSCC_Center","cSCC_Tumor"), "cSCC", Region)]
+
+# Check
+#table(epiDat$AOIInfo)
+#table(epiDat$Region)
+
+# Dermis
+dermDat <- analysisLong[AOIInfo == "Derm" | (Region == "cSCC_Stroma")]
+
+#table(dermDat$AOIInfo)
+#table(dermDat$Region)
+
+###############################################################################
+### Create line plots for each strata without SP
+###############################################################################
+
+epiPlot <- geneMeans(epiDat)
+
+# Make region an ordered factor
+epiPlot[,Region:=factor(Region,levels = c("SunProtected","SunDamaged","AKEdge","AKCenter","cSCC"))]
+
+
+dermPlot <- geneMeans(dermDat)
+
+# Make region an ordered factor
+dermPlot[,Region:=factor(Region,levels = c("SunProtected","SunDamaged","AKEdge","AKCenter","cSCC_Stroma"))]
+
+# Check
+#epiPlot
+#dermPlot
+
+####################################
+## Epi
+####################################
+genes12 <- genes[1:12]
+
+# Epi plot
+ggplot(epiPlot[genes %in% genes12 & Region !="SunProtected"], aes(x=as.numeric(Region),y=M)) +
+  geom_point() +
+  geom_line() +
+  geom_errorbar(aes(ymin = lower, ymax=upper),width=0.25)+ 
+  facet_wrap(~genes, scales = "free_y")+
+   scale_x_continuous(breaks = c(2,3,4,5),labels =c("SD","AK-Edge","AK-Center","cSCC")) +
+  theme_bw() +
+  ylab("log2(CPM)") + xlab("Region") + ggtitle("Means and 95% confidence intervals accross regions","Epi set 1") +
+  theme(axis.text.x  = element_text(angle = 90))
+
+
+#ggsave("Results/Means/EpiSelectedGenesMeansBatch1.png")
+
+genes24 <- genes[13:24]
+ggplot(epiPlot[genes %in% genes24 & Region !="SunProtected"], aes(x=as.numeric(Region),y=M)) +
+  geom_point() +
+    geom_line() +
+  geom_errorbar(aes(ymin = lower, ymax=upper, width=0.25))+ 
+  facet_wrap(~genes, scales = "free_y")+
+   scale_x_continuous(breaks = c(2,3,4,5),labels =c("SD","AK-Edge","AK-Center","cSCC")) +
+  theme_bw() +
+  ylab("log2(CPM)") + xlab("Region") + ggtitle("Means and 95% confidence intervals accross regions","Epi set 2") +
+  theme(axis.text.x  = element_text(angle = 90))
+
+#ggsave("Results/Means/EpiSelectedGenesMeansBatch2.png")
+
+############################
+## Derm
+############################
+
+genes12 <- genes[1:12]
+
+# Epi plot
+ggplot(dermPlot[genes %in% genes12 & Region !="SunProtected"], aes(x=as.numeric(Region),y=M)) +
+  geom_point() +
+    geom_line() +
+  geom_errorbar(aes(ymin = lower, ymax=upper), width=0.25)+ 
+  facet_wrap(~genes, scales = "free_y")+
+   scale_x_continuous(breaks = c(2,3,4,5),labels =c("SD","AK-Edge","AK-Center","cSCC")) +
+  theme_bw() +
+  ylab("log2(CPM)") + xlab("Region") + ggtitle("Means and 95% confidence intervals accross regions","Derm set 1") +
+  theme(axis.text.x  = element_text(angle = 90))
+
+
+#ggsave("Results/Means/DermSelectedGenesMeansBatch1.png")
+
+genes24 <- genes[13:24]
+ggplot(dermPlot[genes %in% genes24 & Region !="SunProtected"], aes(x=as.numeric(Region),y=M)) +
+  geom_point() +
+    geom_line() +
+  geom_errorbar(aes(ymin = lower, ymax=upper),width=0.25)+ 
+  facet_wrap(~genes, scales = "free_y")+
+   scale_x_continuous(breaks = c(2,3,4,5),labels =c("SD","AK-Edge","AK-Center","cSCC")) +
+  theme_bw() +
+  ylab("log2(CPM)") + xlab("Region") + ggtitle("Means and 95% confidence intervals accross regions","Derm set 2") +
+  theme(axis.text.x  = element_text(angle = 90))
+
+#ggsave("Results/Means/DermSelectedGenesMeansBatch2.png")
+
+
+```
+
+
+
+### Pairwise Compairsons
+Here we are looking at the pairwise comparisons for the genes above. We use a random intercept
+mixed model to account for the repeated samples within a person. We first test if any of the regions were differentially expressed using analysis of variance. We then plot the pairwise comparisons for each gene showing at least one 
+region was differentially expressed. 
+
+
+```{r pairwise, fig.height=10, fig.width=10}
+
+#########################################################
+## Here we are going to look at all pairwise comparisons 
+## for the plots above. 
+###########################################################
+
+# Read in analysis data
+analysis <- readRDS("GeneAnalysisData.RDS")
+setDT(analysis) # turn data into a data table object
+
+
+##################################################################
+# Create gene list
+##################################################################
+genes<-c("CD274","CD28","CD80","CD86","CIITA","CTLA4","HAVCR2","HLA-DMA","HLA-DOA",
+          "HLA-DOB","HLA-DPB1","HLA-DRB1","LAG3","LGALS1","LGALS3","LGALS4","PDCD1",
+          "PDCD1LG2", "PVR", "TIGIT", "TNFRSF18", "TNFRSF9", "TNFSF18",  "TNFSF9"  )
+
+
+#############################################################
+## Make analysis data long so the genes are in the rows
+#############################################################
+cols <- c("SubjectID","AOIInfo","Region","SubjectIDMatched",genes)
+
+analysisLong <- melt.data.table(analysis[,.SD,.SDcols = cols],
+                                id.vars = c("SubjectID","AOIInfo","Region","SubjectIDMatched"),
+                                variable.name = "genes",
+                                value.name = "exp")
+
+
+
+
+
+###############################################################################
+## Split data into Epi and Derm
+###
+###. With cSCC Stroma in the Derm strata and cSCC Tumor, edge and center in the Epi strata. 
+################################################################################
+
+epiDat <- analysisLong[AOIInfo == "Epi" | (Region %in% c("cSCC_Edge","cSCC_Center","cSCC_Tumor"))][,Region := ifelse(
+  Region %in% c("cSCC_Edge","cSCC_Center","cSCC_Tumor"), "cSCC",  Region)
+  ][Region!="SunProtected",][,Region := factor(Region,levels = c("SunDamaged",
+                                                                "AKEdge",
+                                                                "AKCenter",
+                                                                "cSCC"))]
+
+# Check
+#table(epiDat$AOIInfo)
+#table(epiDat$Region)
+
+# Dermis
+dermDat <- analysisLong[AOIInfo == "Derm" | (Region == "cSCC_Stroma")][Region!="SunProtected",][
+  , Region := factor(Region,levels = c("SunDamaged",
+                                        "AKEdge",
+                                        "AKCenter",
+                                        "cSCC_Stroma"))]
+
+#table(dermDat$AOIInfo)
+#table(dermDat$Region)
+
+###############################################################################
+## Get pairwise comparisons for Epi and Derm. Code in the R folder.
+###############################################################################
+EpiPairs <- paircomps(epiDat)
+
+# Order the contrasts 
+
+EpiPairs[,contrast := factor(contrast,levels = c("SunDamaged - AKEdge",
+                                                "SunDamaged - AKCenter",
+                                                "SunDamaged - cSCC",
+                                                "AKEdge - AKCenter",
+                                                "AKEdge - cSCC",
+                                                "AKCenter - cSCC"))]
+
+#table(EpiPairs$contrast)
+
+DermPairs <- paircomps(dermDat)
+
+DermPairs[,contrast := factor(contrast,levels = c("SunDamaged - AKEdge",
+                                                "SunDamaged - AKCenter",
+                                                "SunDamaged - cSCC_Stroma",
+                                                "AKEdge - AKCenter",
+                                                "AKEdge - cSCC_Stroma",
+                                                "AKCenter - cSCC_Stroma"))]
+#table(DermPairs$contrast)
+
+
+###############################################################################
+## Plot results
+###############################################################################
+
+# Significant Epi genes
+sigEpi <- EpiPairs[OverallTest<0.05,][,Sig := fcase(
+  0 >= Lower95Conf & 0 <= Upper95Conf, "",
+  default = "**"
+)]
+
+
+ggplot(sigEpi, aes(x=contrast,y=Est)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = Lower95Conf,ymax = Upper95Conf), width=0.25) +
+  facet_wrap(~genes,scale="free_y") +
+  geom_text(aes(x = contrast, y=Upper95Conf+0.025, label = Sig)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=90)) +
+  ggtitle("Genes with at least one significant comparison.","Epidermis") +
+  ylab("Estimate") +xlab("")+
+    labs(caption = "** represents a significant comparison. A random intercept model was
+       fit to account for the within person correlation Laird and Ware (1982)")
+
+
+
+# Significant Derm Genes
+sigDerm <- DermPairs[OverallTest<0.05,][,Sig := fcase(
+  0 >= Lower95Conf & 0 <= Upper95Conf, "",
+  default = "**"
+)]
+
+
+ggplot(sigDerm, aes(x=contrast,y=Est)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = Lower95Conf,ymax = Upper95Conf), width=0.25) +
+  facet_wrap(~genes,scale="free_y") +
+  geom_text(aes(x = contrast, y=Upper95Conf+0.025, label = Sig)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=90)) +
+  ggtitle("Genes with at least one significant comparison.","Dermis") +
+  ylab("Estimate") +xlab("") +
+  labs(caption = "** represents a significant comparison. A random intercept model was
+       fit to account for the within person correlation Laird and Ware (1982)")
+
+
+
+
+###############################################################################
+### Save results
+################################################################################
+write.csv(EpiPairs,"EpiPairwiseComparisons.csv")
+write.csv(DermPairs,"DermPairwiseComparisons.csv")
+```
+
+
+
+
+
+
+
+## Trajectory Analysis
+
+The goal of this analysis is to identify genes with either a positive or negative trend from sun-protected to AK-Center. We assign a numeric value to each region (SP=0, SD=1, AKEdge=2, AKCenter=3). We use generalized estimating equations to estimate the population average trend for each gene from SP to AKCenter. For genes with a significant trend we plot the population average trend estimated from the gee model and the personal trends (estimated by a linear model) for each person (in gray) to see how the trajectory of gene expression from SP-AKCenter varies between people. In the epidermis only the HLA-DPB1 gene had a significant expression trend.
+
+```{r analysis1 for a few genes , warning=FALSE, message=FALSE}
+# remove data in enviroment (this keeps memory low)
+#rm(list=ls())
+
+#######################################
+## Load the analysis data. 
+#######################################
+# Load in the analysis1 data analysis1 and make sure subject ID is a factor. 
+analysis <- readRDS("GeneAnalysisData.RDS")
+setDT(analysis)
+#dim(analysis) # should be 870 rows. 
+#Check 
+
+#analysis[1:10,1:10] 
+
+#table(analysis1$SubjectID) 
+
+#table(analysis1$Region,analysis1$RegionOrdinal)
+
+##################################################################
+# Create gene list
+##################################################################
+genes<-c("CD274","CD28","CD80","CD86","CIITA","CTLA4","HAVCR2","HLA-DMA","HLA-DOA",
+          "HLA-DOB","HLA-DPB1","HLA-DRB1","LAG3","LGALS1","LGALS3","LGALS4","PDCD1",
+          "PDCD1LG2", "PVR", "TIGIT", "TNFRSF18", "TNFRSF9", "TNFSF18",  "TNFSF9"  )
+
+#genes[!(genes %in% names(analysis))]
+
+
+##################################################
+## Make dataset from wide to long
+#################################################
+cols <- c("SubjectIDMatched", "RegionOrdinal","AOIInfo", genes)
+
+
+analysis_Long <- melt.data.table(analysis[,.SD, .SDcols = cols],
+                                 id.vars = c("SubjectIDMatched", "RegionOrdinal","AOIInfo"),
+                                 variable.name = "Gene",
+                                 value.name = "Exp")
+
+
+
+###########################################
+## Get Epi Results
+###########################################
+# filter only for only epi samples, order by subjectID
+Epi <- analysis_Long[AOIInfo=="Epi"][order(SubjectIDMatched)] # Order by subjectID
+                                    
+# Get derm results
+EpiResults <- trendMod(Epi)
+
+# Display results
+EpiResults[order(pvalue),.(Gene,Trend=round(Estimate,3), pvalue=round(pvalue,3))] %>%
+   kbl(caption = "Epi results for SP-AKCenter trend") %>%
+  kable_classic() %>%
+  scroll_box(width = "100%", height = "400px")
+
+
+###########################################
+## Get Derm Results
+###########################################
+# filter only for only Derm samples, order by subjectID
+Derm <- analysis_Long[AOIInfo=="Derm"][order(SubjectIDMatched)] # Order by subjectID
+
+# Get derm results
+DermResults <- trendMod(Derm)
+
+DermResults[order(pvalue),.(Gene,Trend= round(Estimate,3), pvalue=round(pvalue,3))] %>%
+   kbl(caption = "Derm results for SP-AKCenter trend") %>%
+  kable_classic() %>%
+  scroll_box(width = "100%", height = "400px")
+
+
+
+# Epi genes with significant trend
+sigEpi <- unlist(EpiResults[pvalue<0.05,.(Gene)])
+plots(Epi[Gene %in% sigEpi],EpiResults[Gene%in%sigEpi])
+
+
+# Save results
+write.csv(EpiResults[,.(Gene,Trend=round(Estimate,3),pvalue=round(pvalue,3))], file = "EpiTrendSelectGenes.csv")
+
+write.csv(DermResults[,.(Gene,Trend=round(Estimate,3),pvalue = round(pvalue,3))],"DermTrendSelectGenes.csv")
+
+
+```
+
+```{r selected genes check, echo=FALSE, eval=FALSE}
+
+# This chunk is intended to check the results of the table and figures above, this
+
+# Is not included in the report. 
+dat <- analysis_Long[AOIInfo=="Epi" & Gene=="HAVCR2"][, SubjectIDMatched:= factor(SubjectIDMatched)][order(SubjectIDMatched)]
+
+summary(geeglm(Exp~RegionOrdinal, id=SubjectIDMatched,
+                   family = gaussian, corstr = "exchangeable", dat=dat))
+
+```
+
+
+
+
+
+## Appendix
+
+### Means across ROI 
+For selected genes, we will be plotting the mean and 95% confidence intervals across ROI's. We will use generalized estimating equations to estimate the mean log2 CPM expression in each ROI. The generalized estimating approach allows us to account for the within person correlation. We use a large sample approximation to estimate the 95% confidence intervals. The selected genes we are looking at are:
+
+CD274, CD28, CD80, CD86, CIITA, CTLA4, HAVCR2, HLA-DMA HLA-DOA, HLA-DOB, HLA-DPB1, HLA-DRB1, LAG3, LGALS1, LGALS3, LGALS4, PDCD1, PDCD1LG2, PVR, TIGIT, TNFRSF18, TNFRSF9, TNFSF18, TNFSF9
+
+```{r means and conf,warning=FALSE, message=FALSE ,fig.width=7.5, fig.height=7.5}
+# Read in analysis data
+analysis <- readRDS("GeneAnalysisData.RDS")
+setDT(analysis) # turn data into a data table object
+
+# Make factor region to make sure SP-AKCenter are in the right order. 
+analysis[,Region:=factor(Region,levels = c("SunProtected",
+                                           "SunDamaged",
+                                           "AKEdge",
+                                           "AKCenter",
+                                           "cSCC_Stroma",
+                                           "cSCC_Edge",
+                                           "cSCC_Center",
+                                           "cSCC_Tumor"))]
+
+
+##################################################################
+# Create gene list
+##################################################################
+genes<-c("CD274","CD28","CD80","CD86","CIITA","CTLA4","HAVCR2","HLA-DMA","HLA-DOA",
+          "HLA-DOB","HLA-DPB1","HLA-DRB1","LAG3","LGALS1","LGALS3","LGALS4","PDCD1",
+          "PDCD1LG2", "PVR", "TIGIT", "TNFRSF18", "TNFRSF9", "TNFSF18",  "TNFSF9"  )
+
+
+#############################################################
+## Make analysis data long so the genes are in the rows
+#############################################################
+cols <- c("SubjectIDMatched","AOIInfo","Region",genes)
+
+analysisLong <- melt.data.table(analysis[,.SD,.SDcols = cols],
+                                id.vars = c("SubjectIDMatched","AOIInfo","Region"),
+                                variable.name = "genes",
+                                value.name = "exp")
+
+
+
+
+
+##############################################################
+### Get Epi and Derm means and se's for each region.
+### 
+##############################################################
+
+# filter only for only epi samples, order by subjectID and drop the unused levels
+#. for region (the cSCC samples).
+Epi <- analysisLong[AOIInfo=="Epi" # Filter on Epi
+                                  ][order(SubjectIDMatched) # Order by subjectID
+                                    ][,Region:=droplevels(Region)]
+
+# get means for each gene in Epi
+epiMeans <- meansFun(Epi) # Drop unused region levels
+
+
+
+# filter only for only Derm samples, order by subjectID and drop the unused levels
+#. for region (the cSCC samples).
+Derm <- analysisLong[AOIInfo=="Derm" # Filter on Epi
+                                  ][order(SubjectIDMatched) # Order by subjectID
+                                    ][,Region:=droplevels(Region)]
+
+dermMeans <- meansFun(Derm) # Drop unused region levels
+
+###########################################################
+## Rearrange results
+##
+## Here we are stacking the means and se's for each region 
+## On top of each other to make it easier to plot.
+###########################################################
+epiRes <- rbind(epiMeans[,.(genes,mean=SP,se=SP.se,Region="SP")],
+                epiMeans[,.(genes,mean=SD,se=SD.se,Region="SD")],
+                epiMeans[,.(genes,mean=AKEdge,se=AKEdge.se,Region="AKEdge")],
+                epiMeans[,.(genes,mean=AKCenter,se=AKCenter.se,Region="AKCenter")])
+
+# Factor region to make sure region is in correct order. 
+epiRes[,Region:=factor(Region,levels = c("SP","SD","AKEdge","AKCenter"))]
+
+
+dermRes <- rbind(dermMeans[,.(genes,mean=SP,se=SP.se,Region="SP")],
+                dermMeans[,.(genes,mean=SD,se=SD.se,Region="SD")],
+                dermMeans[,.(genes,mean=AKEdge,se=AKEdge.se,Region="AKEdge")],
+                dermMeans[,.(genes,mean=AKCenter,se=AKCenter.se,Region="AKCenter")])
+
+# Factor region to make sure region is in correct order. 
+dermRes[,Region:=factor(Region,levels = c("SP","SD","AKEdge","AKCenter"))]
+
+
+##############################################################################
+## Plot Epi results. I am breaking this up into seperate batches to help with readability
+## each batch will have 12 genes. 
+##############################################################################
+
+# Genes 1:12
+genes12 <- genes[1:12]
+ 
+ggplot(epiRes[genes %in% genes12],
+        aes(x=as.numeric(Region), y=mean)) +
+  geom_point() +
+  geom_line() +
+  geom_errorbar(aes(ymax = mean+1.96*se, ymin = mean-1.96*se), width=.25) +
+  facet_wrap(~genes, scales = "free_y") +
+  theme_bw() +
+  scale_x_continuous(breaks = c(1,2,3,4),labels =c("SP","SD","AK-Edge","AK-Center")) +
+  ylab("log2(CPM)") + xlab("Region") + ggtitle("Means and 95% confidence intervals accross regions","Epi set 1") +
+  labs(caption = "Means were estimated using GEE \n to account for correlation from repeat sampling") +
+  theme(axis.text.x  = element_text(angle = 90))
+
+
+#ggsave("Results/Means/EpiSelectedGenesMeansBatch1.png")
+
+
+genes24 <- genes[13:24]
+ggplot(epiRes[genes %in% genes24],
+        aes(x=as.numeric(Region), y=mean)) +
+  geom_point() +
+  geom_line() +
+  geom_errorbar(aes(ymax = mean+1.96*se, ymin = mean-1.96*se),  width=.25) +
+  facet_wrap(~genes, scales = "free_y") +
+  theme_bw() +
+  scale_x_continuous(breaks = c(1,2,3,4),labels =c("SP","SD","AK-Edge","AK-Center")) +
+  ylab("log2(CPM)") + xlab("Region") + ggtitle("Means and 95% confidence intervals accross regions","Epi set2") +
+  labs(caption = "Means were estimated using GEE \n to account for correlation from repeat sampling") +
+  theme(axis.text.x  = element_text(angle = 90))
+
+#ggsave("Results/Means/EpiSelectedGenesMeansBatch2.png")
+
+########################################
+## Plot derm results
+########################################
+
+# Genes 1:12
+genes12 <- genes[1:12]
+ 
+ggplot(dermRes[genes %in% genes12],
+        aes(x=as.numeric(Region), y=mean)) +
+  geom_point() +
+  geom_line() +
+  geom_errorbar(aes(ymax = mean+1.96*se, ymin = mean-1.96*se),  width=.25) +
+  facet_wrap(~genes, scales = "free_y") +
+  theme_bw() +
+  scale_x_continuous(breaks = c(1,2,3,4),labels =c("SP","SD","AK-Edge","AK-Center")) +
+  ylab("log2(CPM)") + xlab("Region") + ggtitle("Means and 95% confidence intervals accross regions","Derm set 1") +
+  labs(caption = "Means were estimated using GEE \n to account for correlation from repeat sampling") +
+  theme(axis.text.x  = element_text(angle = 90))
+
+#ggsave("Results/Means/DermSelectedGenesMeansBatch1.png")
+
+genes24 <- genes[13:24]
+ggplot(dermRes[genes %in% genes24],
+        aes(x=as.numeric(Region), y=mean)) +
+  geom_point() +
+  geom_line() +
+  geom_errorbar(aes(ymax = mean+1.96*se, ymin = mean-1.96*se),  width=.25) +
+  facet_wrap(~genes, scales = "free_y") +
+  theme_bw() +
+  scale_x_continuous(breaks = c(1,2,3,4),labels =c("SP","SD","AK-Edge","AK-Center")) +
+  ylab("log2(CPM)") + xlab("Region") + ggtitle("Means and 95% confidence intervals accross regions","Derm set 2") +
+  labs(caption = "Means were estimated using GEE \n to account for correlation from repeat sampling") +
+  theme(axis.text.x  = element_text(angle = 90))
+
+
+#ggsave("Results/Means/DermSelectedGenesMeansBatch2.png")
+
+```
+
+
+```{r, echo=FALSE, eval=FALSE}
+################################################################################
+### This chunk does not need to be ran. Only to check the results for a few genes
+##
+## Primarily this is checking that the means were estimated by gene correctly
+## in data.table. 
+###############################################################################
+
+epidat <- analysis[AOIInfo=="Epi"][order(SubjectID)][,Region:=droplevels(Region)]
+
+mod <- geeglm(`HLA-DPB1`~Region -1, id=SubjectID,
+                   family = gaussian, corstr = "exchangeable", data = epidat)
+
+
+summary(mod)
+
+# Check epi results
+epiRes[genes=="HLA-DPB1"] # Means and se's match
+
+
+
+dermdat <- analysis[AOIInfo=="Derm"][order(SubjectID)][,Region:=droplevels(Region)]
+
+modderm <- geeglm(CTLA4~Region -1, id=SubjectID,
+                   family = gaussian, corstr = "exchangeable", data = dermdat)
+
+
+summary(modderm)
+
+dermRes[genes=="CTLA4"] # This is correct.
+```
+
+
+```{r, echo=FALSE, eval=FALSE}
+################################################################################
+### This chunk does not need to be ran. Only to check the results for a few genes
+##
+## Primarily this is checking that the means were estimated by gene correctly
+## in data.table. 
+###############################################################################
+
+epidat <- analysis[AOIInfo=="Epi"][order(SubjectIDMatched)][,Region:=droplevels(Region)]
+
+mod <- geeglm(`HLA-DPB1`~Region -1, id=SubjectIDMatched,
+                   family = gaussian, corstr = "exchangeable", data = epidat)
+
+
+summary(mod)
+
+# Check epi results
+epiRes[genes=="HLA-DPB1"] # Means and se's match
+
+
+
+dermdat <- analysis[AOIInfo=="Derm"][order(SubjectIDMatched)][,Region:=droplevels(Region)]
+
+modderm <- geeglm(CTLA4~Region -1, id=SubjectIDMatched,
+                   family = gaussian, corstr = "exchangeable", data = dermdat)
+
+
+summary(modderm)
+
+dermRes[genes=="CTLA4"] # This is correct.
+```
+
+The goal of this analysis is to find differentlially expressed genes in
+
+-   Epi Sun-Damaged vs cSCC (edge, center and tumor combined)
+
+-   Epi AK-Edge vs cSCC (edge, center and tumor combined)
+
+-   Epi AK-Center vs cSCC (edge, center and tumor combined)
+
+-   Derm Sun-Damaged vs stromal cSCC
+
+-   Derm AK-Edge vs stromal cSCC
+
+-   Derm AK-Center vs stromal cSCC
+
+For this we model SD, AK-edge and AK-center separately to break up the correlation between the regions. The cSCC samples are from different people than the SD-AK-Center samples and contain the regions cSCC-Edge, cSCC-Center, cSCC-Stroma and cSCC-Tumor. For this analysis we are comparing the Epi SD and AK samples to the to the cSCC-tumor, cSCC-Edge and cSCC-Center samples combined as one cSCC tissue type. The derm SD and AK samples are are compared to the cSCC stroma samples. We use GEE with an exchangeable correlation structure to account for the within person correlation between samples. For each gene, we collect the estimated log2 CPM fold change and the pvalue. HLA . In the epidermis samples genes HLA-DOB, CD86, HLA-DOA, PDCD1, and TNFSF9 were down regulated in cSCC compared to SD, AKEdge and AK Center. While IFNGR1 was up regulated in cSCC compared to all other regions. In the dermis samples CD27 was up regulated in cSCC stroma compared to all other dermis regions (SK through AKCenter), while TNFSF9 was down regulated compared to all other regions.
+
+We plot the results in an interative heatmap that shows the significant fold changes for each gene and each comparison.
+
+```{r diff expression selected genes, fig.height=10, fig.width=10, , warning=FALSE, message=FALSE}
+# remove data in enviroment (this keeps memory low)
+#rm(list=ls())
+#######################################
+## Step 1: load analysis data
+#######################################
+
+# Load in the analysis1 data analysis1 and make sure subject ID is a factor. 
+analysis <- readRDS("GeneAnalysisData.RDS")
+setDT(analysis)
+
+#Check 
+
+#analysis2[1:10,1:10] 
+
+#table(analysis2$SubjectID) 
+
+
+##########################################
+## Step 2:
+##  Collapse the cSCC regions into one cSCC region. Also add a second region variable
+##   that has the AKCenter and AK-Edge collapsed. 
+##########################################
+
+analysis2 <- analysis[,Region2 := factor(ifelse(grepl("cSCC",Region), "cSCC",Region),
+                                         levels = c("SunProtected","SunDamaged","AKEdge","AKCenter","cSCC"))]
+
+
+# Check
+
+#table(analysis2$Region, analysis2$Region2)
+
+#table(analysis2$AOIInfo,analysis2$Region2)
+
+################################################
+## Put analysis data into long format.
+#################################################
+#get genes for analysis
+genes <-c("CD274","CD28","CD80","CD86","CIITA","CTLA4","HAVCR2","HLA-DMA","HLA-DOA",
+          "HLA-DOB","HLA-DPB1","HLA-DRB1","LAG3","LGALS1","LGALS3","LGALS4","PDCD1",
+          "PDCD1LG2", "PVR", "TIGIT", "TNFRSF18", "TNFRSF9", "TNFSF18",  "TNFSF9",
+          "TNFRSF14", "CD70", "PBK", "TP53RK","TPRKB", "CD27", "TLR4", "STAT1", 
+          "IFNG", "IFNGR1", "IFNGR2", "MYD88", "HMGB1")
+
+# Get columns needed for analysis
+cols <- c("SubjectIDMatched", "AOIInfo","Region","Region2", genes)
+
+analysisLong  <- melt.data.table(analysis2[,.SD, .SDcols = cols],
+                                 id.vars = c("SubjectIDMatched","AOIInfo","Region",
+                                             "Region2"),
+                                 variable.name = "Gene",
+                                 value.name = "Exp"
+)
+
+
+#table(analysisLong$Gene)
+
+##################################################################
+# Create gene list
+##################################################################
+genes<-c("CD274","CD28","CD80","CD86","CIITA","CTLA4","HAVCR2","HLA-DMA","HLA-DOA",
+          "HLA-DOB","HLA-DPB1","HLA-DRB1","LAG3","LGALS1","LGALS3","LGALS4","PDCD1",
+          "PDCD1LG2", "PVR", "TIGIT", "TNFRSF18", "TNFRSF9", "TNFSF18",  "TNFSF9"  )
+
+
+##################################################################
+## Run the following gee models
+##
+##  Epi Sun-Damaged vs cSCC (edge, center and tumor combined) 
+##
+##  Epi AK-Edge vs cSCC (edge, center and tumor combined) 
+##
+##  Epi AK-Center vs cSCC (edge, center and tumor combined) 
+##
+##
+##  Derm Sun-Damaged vs stromal cSCC 
+##
+##  Derm AK-Edge vs stromal cSCC 
+##
+##  Derm AK-Center vs stromal cSCC 
+##################################################################
+
+
+# Plot results. This function takes the results from above and plots the genes
+## with a significant fold change. 
+#plotSigResults <- function(res, title=""){
+  
+  # Filter only significant results
+#  sig = res[pvalue<0.05]
+  
+ # wrap_plots(sig$plot) +
+#   plot_annotation(title=title)
+#}
+
+
+# Get regions for Epi cSCC
+EpicSCC <- c("cSCC_Center","cSCC_Edge","cSCC_Tumor")
+
+
+# For each analysis we filter on the region of interest, drop the unused levels
+# of the Region2 variable and order the observations by SubjectID (for GEEPack)
+# EPI SD Vs. cSCC
+EpiSDVscSCC<-  resFun(analysisLong[(Region %in% EpicSCC) | (Region=="SunDamaged" & AOIInfo=="Epi")
+                             ][,Region2:=droplevels(Region2) # Drop unused levels 
+                               ][order(SubjectIDMatched)]) # order by SubjectID
+
+#plotSigResults(EpiSDVscSCC)
+
+
+# EPI AKEdge vs cSCC
+EpiAKEdgeVscSCC<-  resFun(analysisLong[(Region %in% EpicSCC) | (Region=="AKEdge" & AOIInfo=="Epi")
+                             ][,Region2:=droplevels(Region2) # Drop unused levels 
+                               ][order(SubjectIDMatched)])
+
+#plotSigResults(EpiAKEdgeVscSCC)
+
+# EPI AK Center vs cSCC
+EpiAKCenterVScSCC <- resFun(analysisLong[(Region %in% EpicSCC) | (Region=="AKEdge" & AOIInfo=="Epi")
+                             ][,Region2:=droplevels(Region2) # Drop unused levels 
+                               ][order(SubjectIDMatched)])
+
+#plotSigResults(EpiAKCenterVScSCC)
+
+
+# Derm SD vrs stroma
+DermSDVsStroma <- resFun(analysisLong[(Region =="cSCC_Stroma") | (Region=="SunDamaged" & AOIInfo=="Derm")
+                             ][,Region2:=droplevels(Region2) # Drop unused levels 
+                               ][order(SubjectIDMatched)]) 
+
+#plotSigResults(DermSDVsStroma)
+
+
+# Derm AK Edge vrs stroma
+DermAKEdgeVsStroma <- resFun(analysisLong[(Region =="cSCC_Stroma") | (Region=="AKEdge" & AOIInfo=="Derm")
+                             ][,Region2:=droplevels(Region2) # Drop unused levels 
+                               ][order(SubjectIDMatched)]) 
+
+#plotSigResults(DermAKEdgeVsStroma)
+
+
+# Derm AK Edge vrs stroma
+DermAKCenterVsStroma <- resFun(analysisLong[(Region =="cSCC_Stroma") | (Region=="AKCenter" & AOIInfo=="Derm")
+                             ][,Region2:=droplevels(Region2) # Drop unused levels 
+                               ][order(SubjectIDMatched)]) 
+
+#plotSigResults(DermAKCenterVsStroma)
+
+
+
+
+
+
+##############################################################################
+## Plot results in a heatmap
+##############################################################################
+
+combindedResults <- rbind(EpiSDVscSCC[,Comp := "cSCC Vs Epi SD"],
+                          EpiAKEdgeVscSCC[,Comp := "cSCC Vs Epi AKEdge"],
+                          EpiAKCenterVScSCC[,Comp := "cSCC Vs Epi AKCenter"],
+                          DermSDVsStroma[,Comp := "cSCC Stroma Vs Derm SD"],
+                          DermAKEdgeVsStroma[,Comp := "cSCC Stroma Vs Derm AKEdge"],
+                          DermAKCenterVsStroma[,Comp := "cSCC Stroma Vs Derm AKCenter"])
+
+
+
+
+
+
+
+## Make sure the comparisons are in the right order and set to NA any fold change
+## that was not significant. Also add a text variable that will allow use to hover
+combindedResults[,`:=`(
+  
+  # Update comparison
+  comparison = factor(Comp,
+                      levels = c("cSCC Vs Epi SD",
+                                 "cSCC Vs Epi AKEdge",
+                                 "cSCC Vs Epi AKCenter",
+                                 "cSCC Stroma Vs Derm SD",
+                                 "cSCC Stroma Vs Derm AKEdge",
+                                 "cSCC Stroma Vs Derm AKCenter")),
+  
+  
+  sigFoldChange = ifelse(pvalue<0.05,Log2FoldChange,NA),
+  
+  # Add text variable this is used for the interactive heatmap. 
+  text = paste0("Gene: ",Gene, "\n",
+                "Comparison: ",Comp, "\n",
+                "Fold Change: ",round(Log2FoldChange,3),"\n",
+                "P-value: ",round(pvalue,3))
+)]
+
+
+##############################################################################
+## Give quick summary of results
+##############################################################################
+## Give table with results
+combindedResults[,AOI:= ifelse(grepl("Epi",comparison),"Epi","Derm")]
+
+# Summarizes for each gene the number of tests that were significant with a max of 3. 
+resTable <- combindedResults[,.(Up= sum(pvalue<0.05&sigFoldChange>0),
+                    Down = sum(pvalue<0.05&sigFoldChange<0)),by=.(Gene,AOI)]
+
+tab <- cbind(resTable[AOI=="Epi",-2], resTable[AOI=="Derm",-c(1:2)])[
+  ,sums:=rowSums(.SD), .SDcols=is.numeric][order(-sums)][,sums:=NULL]
+
+
+
+tab%>%
+  kbl(caption="Number of significant comparsons for each gene") %>%
+  add_header_above(c("","Epi"=2,"Derm"=2)) %>%
+  kable_classic() %>%
+  scroll_box(width = "100%", height = "400px")
+
+##############################################################################
+# Create the heatmap of estimates and pvalues. 
+##
+## Genes as the rows and the tests will be the columns. The values are filled
+## with the fold change estimate only if the the fold change was significant. 
+##############################################################################
+heatPlot <- ggplot(combindedResults, aes(x=comparison, y=Gene,text= text)) +
+                geom_tile(aes(fill=sigFoldChange)) +
+                  scale_fill_gradient(low = "blue", high = "red") +
+                theme_bw() +
+                theme(axis.text.x = element_text(angle = 15, vjust = .5)) +
+  ggtitle("Significant fold changes") + xlab("Comparison")
+
+
+# Show ggplot interactively. 
+ggplotly(heatPlot, tooltip = "text", width = 800, height = 800)
+
+
+
+################################################################################
+## Save results
+################################################################################
+colsToKeep <- c("Gene","Log2FoldChange","pvalue","comparison","AOI")
+
+#write.csv(combindedResults[,.SD,.SDcols = colsToKeep], file = "Results/DifferentialExpression/SelectedGenesSDThroughAKVscSCC.csv")
+
+```
+
+```{r check, echo=FALSE, eval=FALSE}
+
+# This chunck is just to check the model results 
+
+dat <- analysis[(AOIInfo=="Derm" & Region=="SunDamaged")|(Region %in% c("cSCC_Stroma"))][,Region:= fcase(Region%in%c("cSCC_Stroma"),"cSCC",
+                                                                                                                                 default = Region)]
+
+dat$Region <- factor(dat$Region, level=c("SunDamaged", "cSCC"))
+
+mod <- geeglm(`HLA-DOB`~Region, id=SubjectIDMatched, data = dat[order(SubjectIDMatched)], 
+  corstr = "exchangeable") 
+
+
+summary(mod)
+
+table(dat$AOIInfo,dat$Region1)
+
+```
+
