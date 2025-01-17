@@ -372,12 +372,19 @@ link below.</p>
 <p>The AnalysisReport.Rmd uses HTTP access via WebDav to automattically
 load the processed data from Cyverse into the R environment. An example
 of this code is below.</p>
-<p>```{r} # This is a link to the processed data on cyverse data_path =
-data_path = “<a href="https://data.cyverse.org/dav-anon/iplant/projects/SkinPPG/H202SC24094550/Nanostring/Processed/StandardizedNanostringData.rds" class="uri">https://data.cyverse.org/dav-anon/iplant/projects/SkinPPG/H202SC24094550/Nanostring/Processed/StandardizedNanostringData.rds</a>”</p>
+<pre><code># This is a link to the processed data on cyverse
+data_path = data_path = &quot;https://data.cyverse.org/dav-anon/iplant/projects/SkinPPG/H202SC24094550/Nanostring/Processed/StandardizedNanostringData.rds&quot; 
+
+# You may need to edit this code to update path
+normalizedData &lt;- readRDS(url(data_path))</code></pre>
 </div>
-<div id="you-may-need-to-edit-this-code-to-update-path" class="section level1">
-<h1>You may need to edit this code to update path</h1>
-<p>normalizedData &lt;- readRDS(url(data_path)) ```</p>
+<div id="download-this-repository" class="section level1">
+<h1>Download this repository</h1>
+<p>To download this repository and run the analysis, make sure you have
+git installed. For help installing git or using git with git hub, <a href="https://docs.github.com/en/get-started/getting-started-with-git">here
+is a reference to help you get started</a>. If you have git set up, you
+can clone this repository with:</p>
+<pre><code>git clone https://github.com/JoelParkerUofA/NanostringSkinPPGPaper.git</code></pre>
 </div>
 
 
