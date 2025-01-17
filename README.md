@@ -22,7 +22,7 @@ data from Cyverse into the R environment. An example of this code is below.
 
 ```
 # This is a link to the processed data on cyverse
-data_path = data_path = "https://data.cyverse.org/dav-anon/iplant/projects/SkinPPG/H202SC24094550/Nanostring/Processed/StandardizedNanostringData.rds" 
+data_path = "https://data.cyverse.org/dav-anon/iplant/projects/SkinPPG/H202SC24094550/Nanostring/Processed/StandardizedNanostringData.rds" 
 
 # You may need to edit this code to update path
 normalizedData <- readRDS(url(data_path))
